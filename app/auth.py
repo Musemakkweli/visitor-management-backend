@@ -1,5 +1,6 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,9 +17,58 @@ from app.security import (
     hash_password,
     verify_password,
     create_access_token,
+    decode_access_token,
 )
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+# Reads the Bearer token sent by the frontend.
+bearer_scheme = HTTPBearer()
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+):
+    """Identify the currently logged-in user."""
+    token = credentials.credentials
+    payload = decode_access_token(token)
+
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user_id = payload.get("sub")
+
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        user_id = int(user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = db.get(User, user_id)
+
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or account inactive.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return user
 
 
 @router.post(
@@ -38,7 +88,6 @@ def signup(data: SignupRequest, db: Session = Depends(get_db)):
             detail="Passwords do not match.",
         )
 
-    # Check whether the email is already registered.
     existing_user = db.scalar(
         select(User).where(User.email == email)
     )
@@ -49,7 +98,6 @@ def signup(data: SignupRequest, db: Session = Depends(get_db)):
             detail="An account with this email already exists.",
         )
 
-    # Employee registration.
     if data.account_type == "employee":
 
         employee_number = data.employee_number.strip().upper()
@@ -74,7 +122,6 @@ def signup(data: SignupRequest, db: Session = Depends(get_db)):
 
         role = "receptionist"
 
-    # Create the account.
     user = User(
         full_name=data.full_name.strip(),
         email=email,
@@ -104,14 +151,12 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
 
     identifier = data.identifier.strip()
 
-    # First, search by email.
     user = db.scalar(
         select(User).where(
             User.email == identifier.lower()
         )
     )
 
-    # If no email matches, search by employee number.
     if user is None:
         user = db.scalar(
             select(User).where(
